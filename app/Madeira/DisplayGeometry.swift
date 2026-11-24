@@ -195,4 +195,97 @@ extension DisplayGeometry {
         }
     }
 }
+
+// MARK: Tabletop (iPhone Duo half-folded)
+
+/// iPhone Duo tabletop: half-folded like a laptop, with the hinge across the
+/// screen (the inner screen held in portrait), the game goes in the top half
+/// and the touch controls in the bottom half. Flat, fully open or closed, and
+/// half-folded in landscape (a book) lay out as before.
+///
+/// The hinge is read with UIHingeInteraction (iOS 27.1). It is made through
+/// the Objective-C runtime so the app still builds against an older SDK and
+/// runs on older systems, where there is no hinge and nothing changes.
+@MainActor final class Tabletop: ObservableObject {
+    static let shared = Tabletop()
+
+    /// The hinge is partly open (UIHinge.Status.partiallyOpen), as last reported.
+    @Published private(set) var halfOpen = false
+    private(set) var status = 0
+    private(set) var angle: Double = 0
+    private var interaction: AnyObject?
+    private var tried = false
+
+    /// Above this hinge angle (radians, 180 degrees is flat) a partly open
+    /// hinge counts as flat: a phone lying nearly flat on a table is not a laptop.
+    static let flatAngle = 160.0 * Double.pi / 180
+
+    /// Whether a screen (or window) of `size` is split now: half-folded, the
+    /// hinge across it (taller than wide), and a game session on screen.
+    func active(in size: CGSize) -> Bool {
+        guard halfOpen, size.height > size.width else { return false }
+        let library = LibraryModel.shared
+        return library.current != nil || library.preparing != nil
+    }
+
+    /// The game's half: the top, down to the hinge (the middle of the screen).
+    nonisolated static func gameRect(in b: CGRect) -> CGRect {
+        CGRect(x: b.minX, y: b.minY, width: b.width, height: (b.height / 2).rounded(.down))
+    }
+    /// The controls' half: from the hinge to the bottom.
+    nonisolated static func controlsRect(in b: CGRect) -> CGRect {
+        let top = gameRect(in: b).maxY
+        return CGRect(x: b.minX, y: top, width: b.width, height: b.maxY - top)
+    }
+
+    /// Starts reading the hinge from `view`'s hierarchy (a window in the app's scene). Once.
+    func install(on view: UIView) {
+        guard !tried else { return }
+        tried = true
+        guard let cls = NSClassFromString("UIHingeInteraction") else {
+            LogStore.shared.log("[tabletop] no hinge on this system (UIHingeInteraction needs iOS 27.1)")
+            return
+        }
+        typealias Handler = @convention(block) (AnyObject, AnyObject) -> Void
+        typealias InitIMP = @convention(c) (Unmanaged<AnyObject>, Selector, Handler) -> Unmanaged<AnyObject>?
+        let handler: Handler = { _, update in
+            // Read on the calling (main) thread; only plain values cross over.
+            let hinge = (update as? NSObject)?.value(forKey: "hinge") as? NSObject
+            let status = (hinge?.value(forKey: "status") as? NSNumber)?.intValue ?? -1
+            let angle = (hinge?.value(forKey: "angle") as? NSNumber)?.doubleValue ?? 0
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { Tabletop.shared.hingeChanged(status: status, angle: angle) }
+            }
+        }
+        let initSel = NSSelectorFromString("initWithUpdateHandler:")
+        guard let allocated = (cls as AnyObject).perform(NSSelectorFromString("alloc")),
+              let imp = class_getMethodImplementation(cls, initSel) else { return }
+        // init consumes the allocation's +1 and returns +1.
+        let make = unsafeBitCast(imp, to: InitIMP.self)
+        guard let made = make(allocated, initSel, handler)?.takeRetainedValue(),
+              let hinge = made as? UIInteraction else {
+            LogStore.shared.log("[tabletop] UIHingeInteraction could not be made")
+            return
+        }
+        interaction = made
+        view.addInteraction(hinge)
+        LogStore.shared.log("[tabletop] watching the hinge")
+    }
+
+    /// status: UIHinge.Status (0 unknown, 1 closed, 2 partly open, 3 fully open), -1 no hinge.
+    private func hingeChanged(status: Int, angle: Double) {
+        let half = status == 2 && !(angle > Self.flatAngle)
+        let degrees = Int((angle * 180 / Double.pi).rounded())
+        if status != self.status || abs(angle - self.angle) > 0.09 || half != halfOpen {
+            LogStore.shared.log("[tabletop] hinge status=\(status) angle=\(degrees)deg half-open=\(half)")
+        }
+        self.status = status
+        self.angle = angle
+        guard half != halfOpen else { return }
+        halfOpen = half
+        // The game layer and the controls window re-frame (sessionBody follows @Published).
+        TouchControlsHost.attach()
+        MetalBackedView.refreshDisplayMode(reason: "hinge")
+    }
+}
 #endif

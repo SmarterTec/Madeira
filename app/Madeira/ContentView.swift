@@ -1298,6 +1298,7 @@ struct ContentView: View {
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
+    @ObservedObject private var tabletop = Tabletop.shared
     @State private var desktopSizeTick = 0   // ml1157: bumps after a Resolution pick
     @Namespace private var pointerNS
     /// The library front end (Library.swift). When it is the chosen interface it
@@ -1445,19 +1446,30 @@ struct ContentView: View {
     /// library's menu button, starting screen and in-game menu drawn above it by
     /// TouchControlsOverlay (LibraryHUD), in the window above the game surface.
     private var sessionBody: some View {
-        ZStack {
-            Color.black
-            MadeiraMetalView()
-                .onAppear { TouchControlsHost.attach() }
-                .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)
-                    .merge(with: NotificationCenter.default.publisher(for: DisplayGeometry.changed))) { _ in
-                    TouchControlsHost.attach()   // re-frame to the new bounds (a rotation, or a fold in the same orientation)
-                }
+        GeometryReader { geo in
+            // iPhone Duo tabletop (Tabletop, DisplayGeometry.swift): half-folded with the
+            // hinge across the screen, the game takes the top half; the controls window
+            // takes the bottom half (TouchControlsHost.attach).
+            let split = tabletop.active(in: geo.size)
+            let game = split ? Tabletop.gameRect(in: CGRect(origin: .zero, size: geo.size)).size : geo.size
+            ZStack(alignment: .top) {
+                Color.black
+                MadeiraMetalView()
+                    .frame(width: game.width, height: game.height)
+                    .onAppear { TouchControlsHost.attach() }
+                    .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)
+                        .merge(with: NotificationCenter.default.publisher(for: DisplayGeometry.changed))) { _ in
+                        TouchControlsHost.attach()   // re-frame to the new bounds (a rotation, or a fold in the same orientation)
+                    }
+            }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
         }
         .ignoresSafeArea()
         .background(Color.black)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
+        // A touch on the screen's edges is the game's first (the cursor reaches the edges).
+        .defersSystemGestures(on: .all)
     }
 
     /// Portrait: classic tooling layout — header, badges, 240pt game strip,
@@ -4267,8 +4279,60 @@ final class ControlsWindow: UIWindow {
     }
 }
 
+/// iPhone Duo: the game surface fills the window, but a container above it in
+/// the app's window keeps the safe area, so a touch in the right-hand status
+/// column or the bottom strip never reached the surface (the touch cursor could
+/// not get to those edges). This clear window sits just above the app's window
+/// and below the controls: where the surface covers a point but the app's
+/// window would not hand the touch to it, it takes the touch and passes it on.
+/// Everywhere else it takes nothing.
+final class EdgeTouchWindow: UIWindow {
+    let forwarder = EdgeTouchForwarder()
+
+    override init(windowScene: UIWindowScene) {
+        super.init(windowScene: windowScene)
+        forwarder.frame = bounds
+        forwarder.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        forwarder.backgroundColor = .clear
+        forwarder.isMultipleTouchEnabled = true
+        addSubview(forwarder)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let library = LibraryModel.shared
+        guard library.current != nil, !library.menu, !TouchControlsModel.shared.editing,
+              let surface = MetalBackedView.keyboardTarget, let app = surface.window, app !== self, !app.isHidden
+        else { return nil }
+        // Only the edge strips (the safe area's insets), and never under a sheet the app presented.
+        guard app.rootViewController?.presentedViewController == nil else { return nil }
+        let p = app.convert(point, from: self)
+        guard !app.bounds.inset(by: app.safeAreaInsets).contains(p),
+              surface.convert(surface.bounds, to: app).contains(p) else { return nil }
+        if let hit = app.hitTest(p, with: event), hit === surface || hit.isDescendant(of: surface) { return nil }
+        return forwarder
+    }
+}
+
+/// Hands every touch it gets to the game surface (EdgeTouchWindow).
+final class EdgeTouchForwarder: UIView {
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        MetalBackedView.keyboardTarget?.touchesBegan(touches, with: event)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        MetalBackedView.keyboardTarget?.touchesMoved(touches, with: event)
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        MetalBackedView.keyboardTarget?.touchesEnded(touches, with: event)
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        MetalBackedView.keyboardTarget?.touchesCancelled(touches, with: event)
+    }
+}
+
 enum TouchControlsHost {
     private static var window: ControlsWindow?
+    private static var edge: EdgeTouchWindow?
 
     static func attach() {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -4291,7 +4355,19 @@ enum TouchControlsHost {
             PointerLock.register(host)
             window = w
         }
-        window?.frame = scene.coordinateSpace.bounds
+        if edge == nil {
+            let e = EdgeTouchWindow(windowScene: scene)
+            e.windowLevel = .normal + 1   // above the app's window, below the controls and the pad
+            e.backgroundColor = .clear
+            e.isHidden = false            // never key
+            edge = e
+            MainActor.assumeIsolated { Tabletop.shared.install(on: e.forwarder) }
+        }
+        let full = scene.coordinateSpace.bounds
+        edge?.frame = full
+        // Tabletop: the controls (and the session's menu button) lay out in the bottom half.
+        let split = MainActor.assumeIsolated { Tabletop.shared.active(in: full.size) }
+        window?.frame = split ? Tabletop.controlsRect(in: full) : full
         fputs("[controls] ml644 overlay attached frame=\(window?.frame ?? .zero) " +
               "controls=\(TouchControlsModel.shared.controls.count)\n", stderr)
     }

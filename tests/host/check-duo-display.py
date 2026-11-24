@@ -19,6 +19,7 @@ ResolutionChoices) and DisplayGeometry.swift without UIKit and checks:
 checking it (use it only when a change to existing devices is intended).
 """
 from pathlib import Path
+import re
 import json
 import os
 import subprocess
@@ -35,8 +36,8 @@ content = (app / "ContentView.swift").read_text(encoding="utf-8")
 # (a fold that keeps the orientation), not only on an orientation change.
 assert 'forName: DisplayGeometry.changed, object: nil, queue: .main) { _ in\n            MetalBackedView.refreshDisplayMode(reason: "scene-geometry")' in content, \
     "MetalBackedView re-applies the layout on DisplayGeometry.changed"
-assert content.count('.merge(with: NotificationCenter.default.publisher(for: DisplayGeometry.changed))) { _ in\n'
-                     '                    TouchControlsHost.attach()') == 2, "both game views re-frame the touch controls on DisplayGeometry.changed"
+assert len(re.findall(r'\.merge\(with: NotificationCenter\.default\.publisher\(for: DisplayGeometry\.changed\)\)\) \{ _ in\n\s*TouchControlsHost\.attach\(\)',
+                      content)) == 2, "both game views re-frame the touch controls on DisplayGeometry.changed"
 assert 'NotificationCenter.default.post(name: DisplayGeometry.changed, object: scene)' in geometry
 assert 'ResolutionChoices.update(.landscape(points: now.screen, pixels: now.native))' in geometry
 print("PASS: fold re-frame hooks: game layer and touch controls follow scene geometry")
