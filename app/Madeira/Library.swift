@@ -197,6 +197,10 @@ struct LibraryEntry: Codable, Identifiable {
     var resolution = ResolutionChoices.newEntryValue
     /// The "WxH" this entry starts at on the screen in use now.
     var launchResolution: String { ResolutionChoices.resolve(resolution) }
+    /// The game's window fills the screen even when it fits inside its desktop
+    /// (DesktopGrow, DisplayGeometry.swift, set it when it grew the desktop to
+    /// hold the window): MADEIRA_DESKTOP_FIT_WINDOW for Winios' DESKTOP FIT.
+    var fitWindow: Bool?
     /// How the monitor is scaled to the screen (DisplayMode raw value; nil = Fit).
     var display: String?
     /// FPS limit: 1 = 60, 3 = 30, 4 = 40, 0 = display maximum, 2 = uncapped (madeira_set_vsync_locked).
@@ -852,8 +856,10 @@ struct LibraryEntry: Codable, Identifiable {
         if usesLaunchOptions {
             fputs("[library] ml1163 start=\(runsInDesktop ? "desktop" : "direct") batch=\(isBatch ? 1 : 0) services=\(servicesScript != nil ? 1 : 0) cwd=\(launchDirectory)\n", stderr)
         }
+        setenv("MADEIRA_DESKTOP_FIT_WINDOW", fitWindow == true ? "1" : "0", 1)
         LogStore.shared.log("[display-shape] resolution=\(launchResolution)"
-            + (launchResolution != resolution ? " (\(resolution))" : "") + " mode=\(displayMode.rawValue)")
+            + (launchResolution != resolution ? " (\(resolution))" : "") + " mode=\(displayMode.rawValue)"
+            + (fitWindow == true ? " fit-window" : ""))
     }
 
     /// What the bridge starts. Set on the main thread before the session begins.

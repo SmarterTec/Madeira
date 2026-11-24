@@ -1546,8 +1546,13 @@ static BOOL winios_desktop_fit(NSNumber *key, CAMetalLayer *ml, CGRect c) {
     int desk_w = 0, desk_h = 0;
     winios_screen_size(&desk_w, &desk_h);
     CGRect desk = CGRectMake(0, 0, desk_w, desk_h);
+    /* MADEIRA_DESKTOP_FIT_WINDOW=1 (a library game whose desktop Madeira grew to
+     * hold its window, LibraryEntry.fitWindow): the window fills the screen
+     * even though it now fits, so the bigger desktop only frees the pointer. */
+    const char *always_env = getenv("MADEIRA_DESKTOP_FIT_WINDOW");
+    BOOL always = always_env && always_env[0] == '1';
     BOOL outside = desk_w > 0 && desk_h > 0 && c.size.width >= 64 && c.size.height >= 64
-        && !CGRectContainsRect(CGRectInset(desk, -8, -8), c);
+        && (always || !CGRectContainsRect(CGRectInset(desk, -8, -8), c));
     if (!winios_desktop_fit_enabled() || !outside || !ml.superlayer || !g_compositor_view) {
         if (g_fit_key && [g_fit_key isEqual:key]) g_fit_key = nil;
         return NO;

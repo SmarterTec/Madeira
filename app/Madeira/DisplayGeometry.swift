@@ -299,8 +299,9 @@ extension DisplayGeometry {
 /// (Winios DESKTOP FIT), but the pointer cannot leave the desktop, so the
 /// window's right and bottom strips could not be pointed at. While a session
 /// runs this checks for that, and once seen it sets the game's Resolution to
-/// the smallest standard size that holds the whole window: from the next
-/// start the pointer reaches every part of it. The picture does not change.
+/// the smallest standard size of the same shape that holds the whole window,
+/// and keeps the window filling the screen (LibraryEntry.fitWindow): from the
+/// next start the pointer reaches every part of it and the picture is as before.
 enum DesktopGrow {
     private static var timer: Timer?
     private static var done = false
@@ -314,9 +315,13 @@ enum DesktopGrow {
     }
     static func stop() { timer?.invalidate(); timer = nil }
 
-    /// The smallest standard mode holding w x h, or nil.
-    nonisolated static func fitting(_ w: Int, _ h: Int) -> (w: Int, h: Int)? {
-        GuestDisplay.standardModes.filter { $0.w >= w && $0.h >= h }.min { $0.w * $0.h < $1.w * $1.h }
+    /// The smallest standard mode holding w x h, preferring the shape of the
+    /// desktop it replaces (so the window, filled to the screen, shows no bars), or nil.
+    nonisolated static func fitting(_ w: Int, _ h: Int, shape: (w: Int, h: Int)) -> (w: Int, h: Int)? {
+        let holds = GuestDisplay.standardModes.filter { $0.w >= w && $0.h >= h }
+        let aspect = Double(shape.w) / Double(max(shape.h, 1))
+        let same = holds.filter { abs(Double($0.w) / Double($0.h) - aspect) / aspect < 0.02 }
+        return (same.isEmpty ? holds : same).min { $0.w * $0.h < $1.w * $1.h }
     }
 
     @MainActor static func check() {
@@ -328,11 +333,12 @@ enum DesktopGrow {
         let have = entry.launchResolution.split(separator: "x").compactMap { Int($0) }
         guard have.count == 2, Int(w) > have[0] || Int(h) > have[1] else { return }
         done = true
-        guard let next = fitting(max(Int(w), have[0]), max(Int(h), have[1])) else {
+        guard let next = fitting(max(Int(w), have[0]), max(Int(h), have[1]), shape: (have[0], have[1])) else {
             LogStore.shared.log("[desktop-grow] window needs \(w)x\(h) on a \(have[0])x\(have[1]) desktop: no standard size holds it")
             return
         }
         entry.resolution = "\(next.w)x\(next.h)"
+        entry.fitWindow = true
         library.save(entry)
         LogStore.shared.log("[desktop-grow] window needs \(w)x\(h) on a \(have[0])x\(have[1]) desktop: Resolution set to \(next.w)x\(next.h) from the next start")
     }
