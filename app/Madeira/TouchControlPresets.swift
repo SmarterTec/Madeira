@@ -41,9 +41,78 @@ struct ControlPreset: Codable, Identifiable, Equatable {
 }
 
 enum GestureZoneKind: String, Codable, CaseIterable {
-    case stick, swipe, look, trackpad
+    case stick, swipe, look, trackpad, slider, shifter
     var title: String {
-        switch self { case .stick: "Stick"; case .swipe: "Swipe"; case .look: "Look"; case .trackpad: "Trackpad" }
+        switch self {
+        case .stick: "Stick"; case .swipe: "Swipe"; case .look: "Look"; case .trackpad: "Trackpad"
+        case .slider: "Slider"; case .shifter: "Paddle"
+        }
+    }
+}
+
+/// What a slider zone is for: its direction, label and default axis.
+enum SliderRole: String, Codable, CaseIterable {
+    case gas, brake, clutch, handbrake, steering
+    var title: String {
+        switch self {
+        case .gas: "Gas"; case .brake: "Brake"; case .clutch: "Clutch"
+        case .handbrake: "Handbrake"; case .steering: "Steering"
+        }
+    }
+    /// The short label drawn on the slider.
+    var short: String {
+        switch self {
+        case .gas: "GAS"; case .brake: "BRK"; case .clutch: "CLU"; case .handbrake: "HB"; case .steering: "STEER"
+        }
+    }
+    var horizontal: Bool { self == .steering }
+    var defaultAxis: SliderAxis {
+        switch self {
+        case .steering: .x; case .gas: .y; case .brake: .ry; case .clutch: .rx; case .handbrake: .rt
+        }
+    }
+}
+
+/// The controller axis a slider drives (DirectInput: X, Y, Rx, Ry; the
+/// triggers share Z).
+enum SliderAxis: String, Codable, CaseIterable {
+    case x, y, rx, ry, lt, rt
+    var title: String {
+        switch self {
+        case .x: "X (left stick ↔)"; case .y: "Y (left stick ↕)"; case .rx: "RX (right stick ↔)"
+        case .ry: "RY (right stick ↕)"; case .lt: "Left trigger (Z)"; case .rt: "Right trigger (Z)"
+        }
+    }
+    var isTrigger: Bool { self == .lt || self == .rt }
+}
+
+/// A slider zone's settings. Every field optional so older layouts decode.
+struct SliderSettings: Codable, Equatable {
+    var roleValue: SliderRole?
+    var axisValue: SliderAxis?
+    var fullAxisValue: Bool?
+    var deadzoneValue: Double?
+    var curveValue: Double?
+    var sensitivityValue: Double?
+
+    var role: SliderRole { get { roleValue ?? .gas } set { roleValue = newValue } }
+    var axis: SliderAxis { get { axisValue ?? role.defaultAxis } set { axisValue = newValue } }
+    /// A pedal at rest sits at the axis's centre and presses one way (half);
+    /// full: at rest at one end, pressed to the other.
+    var fullAxis: Bool { get { fullAxisValue ?? false } set { fullAxisValue = newValue } }
+    /// Ignored near rest (steering: near centre), 0...0.3.
+    var deadzone: Double { get { deadzoneValue ?? (role.horizontal ? 0.04 : 0.02) } set { deadzoneValue = newValue } }
+    /// Response curve: 1 linear, above 1 gentler near rest, 1...3.
+    var curve: Double { get { curveValue ?? 1 } set { curveValue = newValue } }
+    /// Full output reached at 1 / this of the travel, 0.5...2.
+    var sensitivity: Double { get { sensitivityValue ?? 1 } set { sensitivityValue = newValue } }
+
+    /// The output for a finger position: `t` in 0...1 for a pedal, -1...1 for steering.
+    func shaped(_ t: Double) -> Double {
+        let sign: Double = t < 0 ? -1 : 1
+        var m = min(abs(t) * sensitivity, 1)
+        m = m <= deadzone ? 0 : (m - deadzone) / max(1 - deadzone, 0.01)
+        return sign * pow(m, max(curve, 0.1))
     }
 }
 
@@ -129,6 +198,12 @@ struct GestureZone: Codable, Identifiable, Equatable {
     var locked: Bool?
     /// Trackpad zones: their settings (nil until one is changed: the defaults).
     var trackpad: TrackpadSettings?
+    /// Slider zones: their settings.
+    var slider: SliderSettings?
+    var sliderSettings: SliderSettings {
+        get { slider ?? SliderSettings() }
+        set { slider = newValue }
+    }
     var pad: TrackpadSettings {
         get { trackpad ?? TrackpadSettings() }
         set { trackpad = newValue }
@@ -142,6 +217,8 @@ struct GestureZone: Codable, Identifiable, Equatable {
         case .stick: return stick.isPad
         case .swipe: return tap.isPad || swipe.values.contains { $0.isPad }
         case .look, .trackpad: return false
+        case .slider: return true
+        case .shifter: return tap.isPad || swipe.values.contains { $0.isPad }
         }
     }
 }

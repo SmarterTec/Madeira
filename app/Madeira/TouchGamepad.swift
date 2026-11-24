@@ -7,6 +7,11 @@ struct GamepadSample: Equatable, Sendable {
     var buttons: UInt16 = 0
     var lt: UInt8 = 0, rt: UInt8 = 0
     var lx: Int16 = 0, ly: Int16 = 0, rx: Int16 = 0, ry: Int16 = 0
+    /// A slider zone's sample (GestureZones.swift) drives single axes, not a
+    /// stick: bits 1 lx, 2 ly, 4 rx, 8 ry. Its axes merge one by one, so a
+    /// steering slider on X and a gas slider on Y do not override each other
+    /// as two stick vectors would. 0 for every other sample.
+    var axisMask: UInt8 = 0
 
     static func axis(_ value: Double) -> Int16 {
         guard value.isFinite else { return 0 }
@@ -99,8 +104,15 @@ struct TouchGamepadState {
                 let m = Int64(a) * Int64(a) + Int64(b) * Int64(b)
                 return n > m || (n == m && (x > a || (x == a && y > b)))
             }
+            guard s.axisMask == 0 else { continue }
             if stronger(s.lx, s.ly, result.lx, result.ly) { result.lx = s.lx; result.ly = s.ly }
             if stronger(s.rx, s.ry, result.rx, result.ry) { result.rx = s.rx; result.ry = s.ry }
+        }
+        // Sliders, after the sticks: each axis takes the larger deflection.
+        for hold in holds.values where hold.value.axisMask != 0 {
+            let s = hold.value
+            func take(_ bit: UInt8, _ v: Int16, _ r: inout Int16) { if s.axisMask & bit != 0, abs(Int(v)) > abs(Int(r)) { r = v } }
+            take(1, s.lx, &result.lx); take(2, s.ly, &result.ly); take(4, s.rx, &result.rx); take(8, s.ry, &result.ry)
         }
         return result
     }

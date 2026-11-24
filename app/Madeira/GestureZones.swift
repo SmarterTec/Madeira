@@ -67,9 +67,39 @@ final class GestureZonesModel: ObservableObject {
         if pinchBase == nil { pinchBase = zones[i] }
         guard let b = pinchBase else { return }
         let w = min(max(b.w * f, 0.06), 1), h = min(max(b.h * f, 0.08), 1)
-        zones[i].w = w; zones[i].h = h
-        zones[i].x = min(max(b.x + (b.w - w) / 2, 0), 1 - w)
-        zones[i].y = min(max(b.y + (b.h - h) / 2, 0), 1 - h)
+        let (sw, sh) = snapSliderSize(i, w, h)
+        zones[i].w = sw; zones[i].h = sh
+        zones[i].x = min(max(b.x + (b.w - sw) / 2, 0), 1 - sw)
+        zones[i].y = min(max(b.y + (b.h - sh) / 2, 0), 1 - sh)
+    }
+
+    /// Sliders keep one size: a slider's width or height within 3% of another
+    /// slider's (of the same direction) snaps to it.
+    func snapSliderSize(_ i: Int, _ w: Double, _ h: Double) -> (Double, Double) {
+        guard zones.indices.contains(i), zones[i].kind == .slider else { return (w, h) }
+        let horizontal = zones[i].sliderSettings.role.horizontal
+        var sw = w, sh = h
+        for (j, o) in zones.enumerated() where j != i && o.kind == .slider && o.sliderSettings.role.horizontal == horizontal {
+            if abs(o.w - w) < 0.03 { sw = o.w }
+            if abs(o.h - h) < 0.03 { sh = o.h }
+        }
+        return (sw, sh)
+    }
+    /// A slider that just became one (or changed direction) takes the size of a
+    /// slider of the same direction, or a default pedal or steering shape.
+    func matchSliderSize(_ i: Int) {
+        guard zones.indices.contains(i), zones[i].kind == .slider else { return }
+        let horizontal = zones[i].sliderSettings.role.horizontal
+        if let o = zones.enumerated().first(where: { $0.offset != i && $0.element.kind == .slider
+            && $0.element.sliderSettings.role.horizontal == horizontal })?.element {
+            zones[i].w = o.w; zones[i].h = o.h
+        } else if horizontal {
+            zones[i].w = 0.4; zones[i].h = 0.16
+        } else {
+            zones[i].w = 0.09; zones[i].h = 0.5
+        }
+        zones[i].x = min(max(zones[i].x, 0), 1 - zones[i].w)
+        zones[i].y = min(max(zones[i].y, 0), 1 - zones[i].h)
     }
     func add() {
         var z = GestureZone()
@@ -132,7 +162,7 @@ final class GestureZoneView: UIView {
             let p = t.location(in: self)
             let key = ObjectIdentifier(t)
             fingers[key] = Finger(origin: p, last: p, began: t.timestamp)
-            if zone.kind != .swipe, driver == nil { driver = key }
+            if zone.kind != .swipe, zone.kind != .shifter, driver == nil { driver = key }
         }
     }
 
@@ -145,7 +175,7 @@ final class GestureZoneView: UIView {
             switch zone.kind {
             case .stick where key == driver: moveStick(&f, p)
             case .look where key == driver: look(&f, p)
-            case .swipe: swipe(&f, p)
+            case .swipe, .shifter: swipe(&f, p)
             default: break
             }
             f.last = p
@@ -212,7 +242,7 @@ final class GestureZoneView: UIView {
         let threshold = 36 / max(0.25, zone.sensitivity)
         let dx = p.x - f.origin.x, dy = p.y - f.origin.y
         let dir: String?
-        switch zone.directions {
+        switch zone.kind == .shifter ? .vertical : zone.directions {
         case .horizontal: dir = abs(dx) >= threshold ? (dx > 0 ? "right" : "left") : nil
         case .vertical:   dir = abs(dy) >= threshold ? (dy > 0 ? "down" : "up") : nil
         case .four:
@@ -283,6 +313,10 @@ struct GestureZonesLayer: View {
                             // A trackpad works only in tabletop (the controls in the bottom half).
                             if Tabletop.splitNow { TrackpadZone(id: zone.id, settings: zone.pad) }
                         }
+                        else if zone.kind == .slider { SliderSurface(zone: zone) }
+                        else if zone.kind == .shifter {
+                            ZStack { ShifterFace(); GestureZoneSurface(zone: zone) }
+                        }
                         else { GestureZoneSurface(zone: zone) }
                     }
                     .frame(width: r.width, height: r.height)
@@ -347,7 +381,10 @@ private struct GestureZoneEditBox: View {
                     if h.x == 1 { w = min(max(b.w + dx, minW), 1 - b.x) }
                     if h.y == -1 { let ny = min(max(b.y + dy, 0), b.y + b.h - minH); hh = b.h + (b.y - ny); y = ny }
                     if h.y == 1 { hh = min(max(b.h + dy, minH), 1 - b.y) }
-                    z.zones[i].x = x; z.zones[i].y = y; z.zones[i].w = w; z.zones[i].h = hh
+                    let (sw, sh) = z.snapSliderSize(i, w, hh)
+                    if h.x == -1 { x += w - sw }
+                    if h.y == -1 { y += hh - sh }
+                    z.zones[i].x = x; z.zones[i].y = y; z.zones[i].w = sw; z.zones[i].h = sh
                 } }
                 .onEnded { _ in base = nil })
     }
@@ -366,6 +403,8 @@ private struct GestureZoneEditBox: View {
         case .look:  return "Look"
         case .swipe: return "Swipe: " + zone.directions.title
         case .trackpad: return "Trackpad"
+        case .slider: return "Slider: " + zone.sliderSettings.role.title
+        case .shifter: return "Paddle"
         }
     }
 }
@@ -413,7 +452,7 @@ struct GestureZonePanel: View {
                 }
                 Button { z.selected = nil } label: { Image(systemName: "xmark") }
             }
-            Picker("Kind", selection: binding(\.kind)) {
+            Picker("Kind", selection: kindBinding) {
                 ForEach(GestureZoneKind.allCases, id: \.self) { Text($0.title) }
             }.pickerStyle(.segmented)
             switch zone.kind {
@@ -423,6 +462,11 @@ struct GestureZonePanel: View {
                 EmptyView()
             case .trackpad:
                 trackpadSettings
+            case .slider:
+                sliderPanel
+            case .shifter:
+                row("Flick up", menu(swipeBinding("up"), Self.pressChoices))
+                row("Flick down", menu(swipeBinding("down"), Self.pressChoices))
             case .swipe:
                 Picker("Directions", selection: binding(\.directions)) {
                     ForEach(SwipeDirections.allCases, id: \.self) { Text($0.title) }
@@ -434,9 +478,9 @@ struct GestureZonePanel: View {
             }
             LayerButtons { mv in if let i { mv.apply(&z.zones, i) } }
             Text("Zones always sit under buttons.").font(.caption).foregroundStyle(.white.opacity(0.6))
-            if zone.kind != .trackpad {
+            if zone.kind != .trackpad && zone.kind != .slider {
                 HStack {
-                    Text(zone.kind == .swipe ? "Swipe length" : "Sensitivity").font(.subheadline)
+                    Text(zone.kind == .swipe || zone.kind == .shifter ? "Swipe length" : "Sensitivity").font(.subheadline)
                     Slider(value: binding(\.sensitivity), in: 0.25...3)
                 }
             }
@@ -456,6 +500,67 @@ struct GestureZonePanel: View {
     private var panelX: CGFloat {
         let half = min(340, screen.width - 32) / 2 + 16
         return zone.x + zone.w / 2 < 0.5 ? screen.width - half : half
+    }
+
+    /// The kind, with the new kind's defaults: a paddle shifts with A and Z
+    /// (unless its flicks were already set), a slider takes the size of a
+    /// slider of the same direction.
+    private var kindBinding: Binding<GestureZoneKind> {
+        Binding(get: { zone.kind }, set: { k in
+            guard let i else { return }
+            z.zones[i].kind = k
+            if k == .shifter, z.zones[i].swipe == GestureZone().swipe {
+                z.zones[i].swipe = ["up": .key(0x41), "down": .key(0x5A)]
+            }
+            if k == .slider { z.matchSliderSize(i) }
+        })
+    }
+
+    private var sliderPanel: some View {
+        let s = zone.sliderSettings
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                row("For", Menu {
+                    ForEach(SliderRole.allCases, id: \.self) { r in
+                        Button(r.title) {
+                            guard let i else { return }
+                            z.zones[i].sliderSettings.role = r
+                            z.zones[i].sliderSettings.axisValue = nil
+                            z.matchSliderSize(i)
+                        }
+                    }
+                } label: { capsule(s.role.title) })
+                row("Axis", Menu {
+                    ForEach(SliderAxis.allCases, id: \.self) { a in
+                        Button(a.title) { sliderBinding(\.axis).wrappedValue = a }
+                    }
+                } label: { capsule(s.axis.title) })
+                if !s.role.horizontal && !s.axis.isTrigger {
+                    Toggle(isOn: sliderBinding(\.fullAxis)) { Text("Full axis").font(.subheadline) }.tint(.cyan)
+                }
+                rangeSlider("Dead zone", sliderBinding(\.deadzone), 0...0.3, percent: true)
+                rangeSlider("Curve", sliderBinding(\.curve), 1...3, percent: false)
+                rangeSlider("Sensitivity", sliderBinding(\.sensitivity), 0.5...2, percent: false)
+            }
+        }
+        .frame(maxHeight: max(120, screen.height - 230))
+    }
+    private func capsule(_ text: String) -> some View {
+        Text(text).font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(Capsule().fill(.white.opacity(0.15)))
+    }
+    private func rangeSlider(_ title: String, _ b: Binding<Double>, _ r: ClosedRange<Double>, percent: Bool) -> some View {
+        HStack {
+            Text(title).font(.subheadline)
+            Slider(value: b, in: r)
+            Text(percent ? "\(Int((b.wrappedValue * 100).rounded()))%" : String(format: "%.1f×", b.wrappedValue))
+                .font(.caption.monospacedDigit()).frame(width: 40)
+        }
+    }
+    private func sliderBinding<T>(_ path: WritableKeyPath<SliderSettings, T>) -> Binding<T> {
+        Binding(get: { zone.sliderSettings[keyPath: path] },
+                set: { v in if let i { z.zones[i].sliderSettings[keyPath: path] = v } })
     }
 
     /// A trackpad's settings (TrackpadSettings). Scrolls when the panel is taller than the screen.
@@ -864,5 +969,190 @@ final class TrackpadView: UIView {
         }
         if owedClick { owedClick = false; click() }
         carryX = 0; carryY = 0
+    }
+}
+
+// MARK: - Analog sliders (gas, brake, clutch, handbrake, steering)
+
+struct SliderSurface: UIViewRepresentable {
+    let zone: GestureZone
+    @ObservedObject private var library = LibraryModel.shared
+    func makeUIView(context: Context) -> SliderView { SliderView() }
+    func updateUIView(_ view: SliderView, context: Context) {
+        view.configure(zone)
+        view.alpha = library.current != nil ? CGFloat(max(library.opacity, 0.3)) : 1
+    }
+    static func dismantleUIView(_ view: SliderView, coordinator: ()) { view.releaseAll() }
+}
+
+/// An analog control: the finger's place along the slider is the value
+/// (absolute). A pedal rises from the bottom (0) to the top (full); steering
+/// runs from the left end (full left) through the centre to the right end.
+/// Released, it springs back to rest. Drives one controller axis, so the game
+/// sees a real analog input (DirectInput: SLRR binds it in Redefine car controls).
+final class SliderView: UIView {
+    private var zone = GestureZone()
+    private var settings: SliderSettings { zone.sliderSettings }
+    private var finger: ObjectIdentifier?
+    private var owner = UUID()
+    private var atFull = false
+    private var lastSide = 0
+
+    private let track = UIView(), fill = UIView(), knob = UIView(), centre = UIView()
+    private let label = UILabel()
+    private var value = 0.0   // shaped output: 0...1 pedal, -1...1 steering
+
+    init() {
+        super.init(frame: .zero)
+        isMultipleTouchEnabled = false
+        backgroundColor = .clear
+        track.backgroundColor = UIColor.white.withAlphaComponent(0.14)
+        track.layer.borderColor = UIColor.white.withAlphaComponent(0.35).cgColor
+        track.layer.borderWidth = 1
+        fill.backgroundColor = UIColor.white.withAlphaComponent(0.42)
+        knob.backgroundColor = UIColor.white.withAlphaComponent(0.85)
+        centre.backgroundColor = UIColor.white.withAlphaComponent(0.5)
+        label.font = .systemFont(ofSize: 9, weight: .semibold)
+        label.textColor = UIColor.white.withAlphaComponent(0.7)
+        label.textAlignment = .center
+        for v in [track, fill, centre, knob, label] as [UIView] { v.isUserInteractionEnabled = false; addSubview(v) }
+        NotificationCenter.default.addObserver(self, selector: #selector(interrupted),
+            name: UIApplication.willResignActiveNotification, object: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    func configure(_ z: GestureZone) {
+        let changed = z.sliderSettings != zone.sliderSettings
+        zone = z
+        if changed { releaseAll() }
+        label.text = settings.role.short
+        setNeedsLayout()
+    }
+    override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { releaseAll() } }
+    @objc private func interrupted() { releaseAll() }
+
+    func releaseAll() {
+        finger = nil
+        GamepadInput.shared.touch(owner: owner, control: zone.id, value: nil)
+        value = 0; atFull = false; lastSide = 0
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let b = bounds
+        track.frame = b
+        let horizontal = settings.role.horizontal
+        let r = min(b.width, b.height) * (horizontal ? 0.5 : 0.22)
+        track.layer.cornerRadius = r
+        fill.layer.cornerRadius = r
+        label.sizeToFit()
+        if horizontal {
+            centre.isHidden = false
+            centre.frame = CGRect(x: b.midX - 0.5, y: b.minY + 4, width: 1, height: b.height - 8)
+            let kw = max(b.height * 0.7, 18)
+            let x = b.midX + CGFloat(value) * (b.width - kw) / 2
+            knob.isHidden = false
+            knob.frame = CGRect(x: x - kw / 2, y: b.minY + 3, width: kw, height: b.height - 6)
+            knob.layer.cornerRadius = (b.height - 6) / 2
+            let fx = min(x, b.midX), fw = abs(x - b.midX)
+            fill.frame = CGRect(x: fx, y: b.minY, width: fw, height: b.height)
+            label.center = CGPoint(x: b.minX + label.bounds.width / 2 + 8, y: b.midY)
+        } else {
+            centre.isHidden = true; knob.isHidden = true
+            let h = b.height * CGFloat(value)
+            fill.frame = CGRect(x: b.minX, y: b.maxY - h, width: b.width, height: h)
+            label.center = CGPoint(x: b.midX, y: b.maxY - label.bounds.height / 2 - 4)
+        }
+    }
+
+    // ---- output ----
+
+    private func output(at p: CGPoint) {
+        let b = bounds
+        guard b.width > 0, b.height > 0 else { return }
+        let horizontal = settings.role.horizontal
+        let t: Double = horizontal
+            ? Double((p.x - b.midX) / (b.width / 2))          // -1 ... 1
+            : Double((b.maxY - p.y) / b.height)               //  0 ... 1
+        value = settings.shaped(max(horizontal ? -1 : 0, min(1, t)))
+        send()
+        haptics()
+        setNeedsLayout()
+    }
+
+    private func send() {
+        var s = GamepadSample()
+        let axis = settings.axis
+        if axis.isTrigger {
+            let v = UInt8(max(0, min(255, (abs(value) * 255).rounded())))
+            if axis == .lt { s.lt = v } else { s.rt = v }
+        } else {
+            // Steering: -1...1 across the axis. A pedal: half (centre to one end)
+            // or full (one end to the other).
+            let a: Double = settings.role.horizontal ? value : (settings.fullAxis ? value * 2 - 1 : value)
+            let v = GamepadSample.axis(a)
+            switch axis {
+            case .x: s.lx = v; s.axisMask = 1
+            case .y: s.ly = v; s.axisMask = 2
+            case .rx: s.rx = v; s.axisMask = 4
+            case .ry: s.ry = v; s.axisMask = 8
+            default: break
+            }
+        }
+        GamepadInput.shared.touch(owner: owner, control: zone.id, value: s)
+    }
+
+    private func haptics() {
+        guard TouchControlsModel.shared.hapticsEnabled else { return }
+        if abs(value) >= 0.99, !atFull { atFull = true; UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        if abs(value) < 0.9 { atFull = false }
+        if settings.role.horizontal {
+            let side = value > 0.02 ? 1 : (value < -0.02 ? -1 : 0)
+            if side != 0, lastSide != 0, side != lastSide { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+            if side != 0 { lastSide = side }
+        }
+    }
+
+    // ---- touches ----
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard finger == nil, let t = touches.first else { return }
+        finger = ObjectIdentifier(t)
+        owner = UUID()
+        output(at: t.location(in: self))
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let t = touches.first(where: { ObjectIdentifier($0) == finger }) else { return }
+        output(at: t.location(in: self))
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
+    private func lift(_ touches: Set<UITouch>) {
+        guard touches.contains(where: { ObjectIdentifier($0) == finger }) else { return }
+        releaseAll()   // springs back to rest
+    }
+}
+
+/// The paddle shifter's face: a narrow lever with up and down chevrons.
+struct ShifterFace: View {
+    @ObservedObject private var library = LibraryModel.shared
+    var body: some View {
+        GeometryReader { g in
+            ZStack {
+                GlassShape(capsule: true)
+                VStack {
+                    Image(systemName: "chevron.up").font(.system(size: 12, weight: .bold))
+                    Spacer()
+                    Image(systemName: "chevron.down").font(.system(size: 12, weight: .bold))
+                }
+                .padding(.vertical, 10)
+                .foregroundStyle(.white.opacity(0.75))
+            }
+            .frame(width: g.size.width, height: g.size.height)
+            .allowsHitTesting(false)
+            .opacity(library.current != nil ? max(library.opacity, 0.3) : 1)
+        }
     }
 }
