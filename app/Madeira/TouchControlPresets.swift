@@ -41,8 +41,64 @@ struct ControlPreset: Codable, Identifiable, Equatable {
 }
 
 enum GestureZoneKind: String, Codable, CaseIterable {
-    case stick, swipe, look
-    var title: String { switch self { case .stick: "Stick"; case .swipe: "Swipe"; case .look: "Look" } }
+    case stick, swipe, look, trackpad
+    var title: String {
+        switch self { case .stick: "Stick"; case .swipe: "Swipe"; case .look: "Look"; case .trackpad: "Trackpad" }
+    }
+}
+
+/// A trackpad zone's settings (GestureZones.swift, TrackpadView). Every field
+/// is optional so settings saved by an older build still decode; the computed
+/// properties give the defaults.
+struct TrackpadSettings: Codable, Equatable {
+    var speedValue: Double?
+    var accelerationValue: Bool?
+    var tapToClickValue: Bool?
+    var twoFingerRightClickValue: Bool?
+    var tapDragValue: Bool?
+    var threeFingerDragValue: Bool?
+    var scrollValue: Bool?
+    var scrollSpeedValue: Double?
+    var naturalScrollValue: Bool?
+    var momentumValue: Bool?
+    var clickButtonsValue: Bool?
+
+    /// Pointer speed, 0.25...4: mouse counts per point is 1.6 × this.
+    var speed: Double { get { speedValue ?? 1 } set { speedValue = newValue } }
+    /// A fast swipe moves the pointer further than a slow one over the same distance.
+    var acceleration: Bool { get { accelerationValue ?? true } set { accelerationValue = newValue } }
+    var tapToClick: Bool { get { tapToClickValue ?? true } set { tapToClickValue = newValue } }
+    var twoFingerRightClick: Bool { get { twoFingerRightClickValue ?? true } set { twoFingerRightClickValue = newValue } }
+    /// Tap, then touch again and move: drags with the left button held.
+    var tapDrag: Bool { get { tapDragValue ?? true } set { tapDragValue = newValue } }
+    /// Three fingers moving drag with the left button held.
+    var threeFingerDrag: Bool { get { threeFingerDragValue ?? false } set { threeFingerDragValue = newValue } }
+    /// Two fingers moving up or down turn the mouse wheel.
+    var scroll: Bool { get { scrollValue ?? true } set { scrollValue = newValue } }
+    /// Scroll speed, 0.25...4: one wheel notch per 36 pt / this.
+    var scrollSpeed: Double { get { scrollSpeedValue ?? 1 } set { scrollSpeedValue = newValue } }
+    /// Content follows the fingers, as on a Mac.
+    var naturalScroll: Bool { get { naturalScrollValue ?? true } set { naturalScrollValue = newValue } }
+    /// Scrolling keeps gliding after the fingers lift.
+    var momentum: Bool { get { momentumValue ?? true } set { momentumValue = newValue } }
+    /// Left and right click buttons along the bottom of the zone, as on a laptop.
+    var clickButtons: Bool { get { clickButtonsValue ?? true } set { clickButtonsValue = newValue } }
+
+    /// The click buttons' strip at the bottom of a trackpad of `rect`
+    /// (local or screen coordinates): its left and right halves, with a gap.
+    func buttonRects(in rect: CGRect) -> (left: CGRect, right: CGRect)? {
+        guard clickButtons else { return nil }
+        let h = min(max(rect.height * 0.24, 36), 64), gap: CGFloat = 6
+        let y = rect.maxY - h
+        let w = (rect.width - gap) / 2
+        return (CGRect(x: rect.minX, y: y, width: w, height: h),
+                CGRect(x: rect.minX + w + gap, y: y, width: rect.width - w - gap, height: h))
+    }
+    /// The pad's own surface: the zone above the click buttons.
+    func padRect(in rect: CGRect) -> CGRect {
+        guard let b = buttonRects(in: rect) else { return rect }
+        return CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(b.left.minY - 6 - rect.minY, 1))
+    }
 }
 
 enum SwipeDirections: String, Codable, CaseIterable {
@@ -71,6 +127,12 @@ struct GestureZone: Codable, Identifiable, Equatable {
     func contains(_ p: CGPoint, in size: CGSize) -> Bool { rect(in: size).contains(p) }
     /// Locked in place: the editor selects it but will not move or resize it.
     var locked: Bool?
+    /// Trackpad zones: their settings (nil until one is changed: the defaults).
+    var trackpad: TrackpadSettings?
+    var pad: TrackpadSettings {
+        get { trackpad ?? TrackpadSettings() }
+        set { trackpad = newValue }
+    }
 
     func rect(in size: CGSize) -> CGRect {
         CGRect(x: x * size.width, y: y * size.height, width: w * size.width, height: h * size.height)
@@ -79,7 +141,7 @@ struct GestureZone: Codable, Identifiable, Equatable {
         switch kind {
         case .stick: return stick.isPad
         case .swipe: return tap.isPad || swipe.values.contains { $0.isPad }
-        case .look: return false
+        case .look, .trackpad: return false
         }
     }
 }

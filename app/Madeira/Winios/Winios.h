@@ -88,6 +88,12 @@ int winios_desktop_point_from_window(double wx, double wy, int *px, int *py);
 /* Main thread: the client rectangle shown by the direct-mode Metal layer.
  * Returns 0 in desktop mode, for launcher dialogs, or before a valid frame. */
 int winios_game_client_rect(int *x, int *y, int *w, int *h);
+/* Main thread: a desktop session's presenting window that reaches past the
+ * wine desktop (DESKTOP FIT). Gives the desktop size it needs to hold the
+ * whole window (its right and bottom edges, in desktop px) and returns 1;
+ * 0 when no window overflows. The pointer cannot leave the desktop, so the
+ * overflowing part of such a window cannot be pointed at. */
+int winios_desktop_overflow(int *w, int *h);
 
 /* Top-level window census, for the starting screen of a Madeira Dock start
  * (DockStartScreen.swift). A Dock start is a desktop session, and the

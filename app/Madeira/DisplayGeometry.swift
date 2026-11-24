@@ -209,6 +209,9 @@ extension DisplayGeometry {
 @MainActor final class Tabletop: ObservableObject {
     static let shared = Tabletop()
 
+    /// The controls window is in the bottom half now (TouchControlsHost.attach sets it).
+    nonisolated(unsafe) static var splitNow = false
+
     /// The hinge is partly open (UIHinge.Status.partiallyOpen), as last reported.
     @Published private(set) var halfOpen = false
     private(set) var status = 0
@@ -286,6 +289,52 @@ extension DisplayGeometry {
         // The game layer and the controls window re-frame (sessionBody follows @Published).
         TouchControlsHost.attach()
         MetalBackedView.refreshDisplayMode(reason: "hinge")
+    }
+}
+
+// MARK: A desktop big enough for the game's window
+
+/// A desktop session (SLRR: a 1366x768 window, with its frame, on a 1280x720
+/// desktop) whose game window reaches past the wine desktop is shown whole
+/// (Winios DESKTOP FIT), but the pointer cannot leave the desktop, so the
+/// window's right and bottom strips could not be pointed at. While a session
+/// runs this checks for that, and once seen it sets the game's Resolution to
+/// the smallest standard size that holds the whole window: from the next
+/// start the pointer reaches every part of it. The picture does not change.
+enum DesktopGrow {
+    private static var timer: Timer?
+    private static var done = false
+
+    static func start() {
+        stop()
+        done = false
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+            MainActor.assumeIsolated { DesktopGrow.check() }
+        }
+    }
+    static func stop() { timer?.invalidate(); timer = nil }
+
+    /// The smallest standard mode holding w x h, or nil.
+    nonisolated static func fitting(_ w: Int, _ h: Int) -> (w: Int, h: Int)? {
+        GuestDisplay.standardModes.filter { $0.w >= w && $0.h >= h }.min { $0.w * $0.h < $1.w * $1.h }
+    }
+
+    @MainActor static func check() {
+        guard !done else { return }
+        let library = LibraryModel.shared
+        guard let id = library.current, var entry = library.entries.first(where: { $0.id == id }) else { return }
+        var w: Int32 = 0, h: Int32 = 0
+        guard winios_desktop_overflow(&w, &h) != 0 else { return }
+        let have = entry.launchResolution.split(separator: "x").compactMap { Int($0) }
+        guard have.count == 2, Int(w) > have[0] || Int(h) > have[1] else { return }
+        done = true
+        guard let next = fitting(max(Int(w), have[0]), max(Int(h), have[1])) else {
+            LogStore.shared.log("[desktop-grow] window needs \(w)x\(h) on a \(have[0])x\(have[1]) desktop: no standard size holds it")
+            return
+        }
+        entry.resolution = "\(next.w)x\(next.h)"
+        library.save(entry)
+        LogStore.shared.log("[desktop-grow] window needs \(w)x\(h) on a \(have[0])x\(have[1]) desktop: Resolution set to \(next.w)x\(next.h) from the next start")
     }
 }
 #endif

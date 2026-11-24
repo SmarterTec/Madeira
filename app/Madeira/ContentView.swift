@@ -3996,6 +3996,7 @@ enum ControlAction: Codable, Equatable, Hashable {
     case joystickWASD        // renders as a stick, posts W/A/S/D
     case joystickArrows      // renders as a stick, posts the arrow keys
     case keyboardToggle      // raises the iOS keyboard, as in portrait
+    case trackpadSwap        // tabletop: the bottom half swaps between the buttons and one big trackpad
     case pad(String)         // ml1930: touch gamepad action, preserving saved layout names.
 
     /// The four keys a stick drives, up/right/down/left. nil for non-sticks.
@@ -4075,6 +4076,7 @@ enum ControlAction: Codable, Equatable, Hashable {
         case .mouseLeft:       return "L"
         case .mouseRight:      return "R"
         case .keyboardToggle:  return "⌨"
+        case .trackpadSwap:    return "⇄"
         case .joystickWASD:    return "WASD"
         case .joystickArrows:  return "↕"
         case .pad(let n):      return n
@@ -4123,6 +4125,12 @@ struct TouchControl: Codable, Identifiable, Equatable {
     var padBinding: String?
     /// Locked in place: the editor selects it but will not move or resize it.
     var locked: Bool?
+    /// Tabletop trackpad mode (TrackpadMode): shown over the full trackpad. nil:
+    /// the swap button and the click buttons stay, everything else hides.
+    var keepOnTrackpad: Bool?
+    var keepsOnTrackpad: Bool {
+        keepOnTrackpad ?? [.trackpadSwap, .mouseLeft, .mouseRight].contains(action)
+    }
 }
 
 final class TouchControlsModel: ObservableObject {
@@ -4156,6 +4164,11 @@ final class TouchControlsModel: ObservableObject {
     /// pinch `scale`. A library entry keeps its own (Control size) and sets it
     /// for its session; transient, so the developer interface stays at 1.
     @Published var sizeScale: Double = 1.0
+
+    /// Whether a control is drawn now: in tabletop trackpad mode only those kept on it.
+    func isShown(_ c: TouchControl) -> Bool {
+        editing || !TrackpadMode.fullNow || c.keepsOnTrackpad
+    }
 
     /// A control's drawn diameter. The view, the hit test and the mapping
     /// panel's placement all use it, so the touch region and the pixels agree.
@@ -4228,7 +4241,9 @@ final class TouchControlsModel: ObservableObject {
         if topBar, CGRect(x: bounds.midX - barW / 2 - 10, y: 0,
                           width: barW + 20, height: 68).contains(p) { return true }
         guard visible else { return false }
-        for c in controls {
+        // Tabletop trackpad mode: the whole bottom half is the trackpad.
+        if TrackpadMode.fullNow && !editing { return true }
+        for c in controls where isShown(c) {
             let r = Self.diameter(c) / 2
             let cx = CGFloat(c.nx) * bounds.width
             let cy = CGFloat(c.ny) * bounds.height
@@ -4367,6 +4382,7 @@ enum TouchControlsHost {
         edge?.frame = full
         // Tabletop: the controls (and the session's menu button) lay out in the bottom half.
         let split = MainActor.assumeIsolated { Tabletop.shared.active(in: full.size) }
+        Tabletop.splitNow = split
         window?.frame = split ? Tabletop.controlsRect(in: full) : full
         fputs("[controls] ml644 overlay attached frame=\(window?.frame ?? .zero) " +
               "controls=\(TouchControlsModel.shared.controls.count)\n", stderr)
@@ -4377,6 +4393,7 @@ struct TouchControlsOverlay: View {
     @ObservedObject private var m = TouchControlsModel.shared
     @ObservedObject private var library = LibraryModel.shared
     @ObservedObject private var zones = GestureZonesModel.shared
+    @ObservedObject private var trackpad = TrackpadMode.shared
     @State private var pinchBase: Double?
 
     var body: some View {
@@ -4396,8 +4413,9 @@ struct TouchControlsOverlay: View {
                             .onTapGesture { m.selected = nil; zones.selected = nil }
                     }
                     if (m.visible || m.editing) && !library.blocksGameplayTouch {
-                        if GestureZonesModel.enabled {
-                            GestureZonesLayer(screen: geo.size, editing: m.editing)
+                        if GestureZonesModel.enabled || TrackpadMode.fullNow {
+                            GestureZonesLayer(screen: geo.size, editing: m.editing,
+                                              fullTrackpad: trackpad.full && TrackpadMode.fullNow && !m.editing)
                         }
                         controls(geo.size, session: session)
                     }
@@ -4456,7 +4474,7 @@ struct TouchControlsOverlay: View {
         // layer over its children, so a button's own .opacity faded its label and
         // left the glass as it was (the Opacity slider seemed to do nothing).
         let opacity = session && !m.editing ? library.opacity : 1
-        let buttons = ForEach(m.controls) { c in
+        let buttons = ForEach(m.controls.filter { m.isShown($0) }) { c in
             TouchControlButton(control: c, screen: screen)
         }
         if #available(iOS 26.0, *) {
@@ -4911,6 +4929,8 @@ struct TouchControlButton: View {
             winios_pointer(0, 0, down ? 0x0008 : 0x0010, 0)   // RIGHTDOWN / RIGHTUP
         case .keyboardToggle:
             if down { MetalBackedView.toggleKeyboard() }
+        case .trackpadSwap:
+            if down { TrackpadMode.shared.toggle() }
         case .none, .joystickWASD, .joystickArrows:
             break                                              // sticks drive themselves
         case .pad:
@@ -5063,13 +5083,15 @@ struct MappingPanel: View {
 
     private var keyboardTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if GamepadInput.keyboardMouseAvailable, !control.action.isPad, control.action != .none, control.action != .keyboardToggle {
+            keepOnTrackpadRow
+            if GamepadInput.keyboardMouseAvailable, !control.action.isPad, control.action != .none,
+               control.action != .keyboardToggle, control.action != .trackpadSwap {
                 bindingSection
             }
             section("Pointer, sticks & special", [
                 ("L click", .mouseLeft), ("R click", .mouseRight),
                 ("WASD", .joystickWASD), ("Arrows", .joystickArrows),
-                ("Keyboard", .keyboardToggle), ("None", .none),
+                ("Keyboard", .keyboardToggle), ("Pad ⇄", .trackpadSwap), ("None", .none),
             ])
             section("Letters", letters)
             section("Numbers", digits)
@@ -5094,8 +5116,20 @@ struct MappingPanel: View {
         }
     }
 
+    /// Tabletop: whether this control stays over the full trackpad (TrackpadMode).
+    private var keepOnTrackpadRow: some View {
+        Toggle(isOn: Binding(get: { control.keepsOnTrackpad }, set: { v in
+            if let i = m.index(of: control.id) { m.controls[i].keepOnTrackpad = v }
+        })) {
+            Text("Keep in trackpad mode").font(.system(size: 12))
+        }
+        .tint(.cyan)
+        .foregroundStyle(.white)
+    }
+
     private var controllerTab: some View {
         VStack(alignment: .leading, spacing: 12) {
+            keepOnTrackpadRow
             Text("Controller controls feed XInput player 1. LS and RS are analogue sticks; "
                  + "LT and RT are full-press triggers. Touch and physical controls can be used together.")
                 .font(.system(size: 11))

@@ -57,7 +57,7 @@ final class GestureZonesModel: ObservableObject {
 
     func index(of id: UUID?) -> Int? { id.flatMap { id in zones.firstIndex { $0.id == id } } }
     func contains(_ p: CGPoint, in bounds: CGRect) -> Bool {
-        Self.enabled && zones.contains { $0.contains(p, in: bounds.size) }
+        Self.enabled && zones.contains { ($0.kind != .trackpad || Tabletop.splitNow) && $0.contains(p, in: bounds.size) }
     }
     /// Pinch in the editor: scales the selected zone about its centre.
     private var pinchBase: GestureZone?
@@ -247,6 +247,8 @@ final class GestureZoneView: UIView {
             DispatchQueue.main.asyncAfter(deadline: .now() + hold) { winios_pointer(0, 0, 0x0010, 0) }
         case .keyboardToggle:
             MetalBackedView.toggleKeyboard()
+        case .trackpadSwap:
+            TrackpadMode.shared.toggle()
         case .none, .joystickWASD, .joystickArrows:
             break
         }
@@ -261,18 +263,31 @@ final class GestureZoneView: UIView {
 struct GestureZonesLayer: View {
     let screen: CGSize
     let editing: Bool
+    /// Tabletop trackpad mode: one trackpad over the whole bottom half, with
+    /// the settings of the layout's first trackpad zone.
+    var fullTrackpad = false
     @ObservedObject private var z = GestureZonesModel.shared
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            ForEach(z.zones) { zone in
-                let r = zone.rect(in: screen)
-                Group {
-                    if editing { GestureZoneEditBox(zone: zone, screen: screen) }
-                    else { GestureZoneSurface(zone: zone) }
+            if fullTrackpad {
+                let first = z.zones.first { $0.kind == .trackpad }
+                TrackpadZone(id: first?.id ?? TrackpadMode.fullID, settings: first?.pad ?? TrackpadSettings())
+                    .frame(width: screen.width, height: screen.height)
+            } else {
+                ForEach(z.zones) { zone in
+                    let r = zone.rect(in: screen)
+                    Group {
+                        if editing { GestureZoneEditBox(zone: zone, screen: screen) }
+                        else if zone.kind == .trackpad {
+                            // A trackpad works only in tabletop (the controls in the bottom half).
+                            if Tabletop.splitNow { TrackpadZone(id: zone.id, settings: zone.pad) }
+                        }
+                        else { GestureZoneSurface(zone: zone) }
+                    }
+                    .frame(width: r.width, height: r.height)
+                    .position(x: r.midX, y: r.midY)
                 }
-                .frame(width: r.width, height: r.height)
-                .position(x: r.midX, y: r.midY)
             }
         }
         .frame(width: screen.width, height: screen.height, alignment: .topLeading)
@@ -350,6 +365,7 @@ private struct GestureZoneEditBox: View {
         case .stick: return "Stick: " + GestureZonePanel.name(zone.stick)
         case .look:  return "Look"
         case .swipe: return "Swipe: " + zone.directions.title
+        case .trackpad: return "Trackpad"
         }
     }
 }
@@ -405,6 +421,8 @@ struct GestureZonePanel: View {
                 row("Output", menu(binding(\.stick), Self.stickChoices))
             case .look:
                 EmptyView()
+            case .trackpad:
+                trackpadSettings
             case .swipe:
                 Picker("Directions", selection: binding(\.directions)) {
                     ForEach(SwipeDirections.allCases, id: \.self) { Text($0.title) }
@@ -416,9 +434,11 @@ struct GestureZonePanel: View {
             }
             LayerButtons { mv in if let i { mv.apply(&z.zones, i) } }
             Text("Zones always sit under buttons.").font(.caption).foregroundStyle(.white.opacity(0.6))
-            HStack {
-                Text(zone.kind == .swipe ? "Swipe length" : "Sensitivity").font(.subheadline)
-                Slider(value: binding(\.sensitivity), in: 0.25...3)
+            if zone.kind != .trackpad {
+                HStack {
+                    Text(zone.kind == .swipe ? "Swipe length" : "Sensitivity").font(.subheadline)
+                    Slider(value: binding(\.sensitivity), in: 0.25...3)
+                }
             }
         }
         .padding(14)
@@ -436,6 +456,42 @@ struct GestureZonePanel: View {
     private var panelX: CGFloat {
         let half = min(340, screen.width - 32) / 2 + 16
         return zone.x + zone.w / 2 < 0.5 ? screen.width - half : half
+    }
+
+    /// A trackpad's settings (TrackpadSettings). Scrolls when the panel is taller than the screen.
+    private var trackpadSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                slider("Speed", padBinding(\.speed))
+                toggle("Acceleration", padBinding(\.acceleration))
+                toggle("Tap to click", padBinding(\.tapToClick))
+                toggle("Two-finger tap: right click", padBinding(\.twoFingerRightClick))
+                toggle("Tap, then drag", padBinding(\.tapDrag))
+                toggle("Three-finger drag", padBinding(\.threeFingerDrag))
+                toggle("Click buttons", padBinding(\.clickButtons))
+                toggle("Two-finger scroll", padBinding(\.scroll))
+                if zone.pad.scroll {
+                    slider("Scroll speed", padBinding(\.scrollSpeed))
+                    toggle("Natural scrolling", padBinding(\.naturalScroll))
+                    toggle("Scroll momentum", padBinding(\.momentum))
+                }
+            }
+        }
+        .frame(maxHeight: max(120, screen.height - 230))
+    }
+    private func toggle(_ title: String, _ b: Binding<Bool>) -> some View {
+        Toggle(isOn: b) { Text(title).font(.subheadline) }.tint(.cyan)
+    }
+    private func slider(_ title: String, _ b: Binding<Double>) -> some View {
+        HStack {
+            Text(title).font(.subheadline)
+            Slider(value: b, in: 0.25...4)
+            Text(String(format: "%.1f×", b.wrappedValue)).font(.caption.monospacedDigit()).frame(width: 36)
+        }
+    }
+    private func padBinding<T>(_ path: WritableKeyPath<TrackpadSettings, T>) -> Binding<T> {
+        Binding(get: { zone.pad[keyPath: path] },
+                set: { v in if let i { z.zones[i].pad[keyPath: path] = v } })
     }
 
     private var directionsShown: [String] {
@@ -516,5 +572,297 @@ struct LayerButtons: View {
                 .accessibilityLabel(m.label)
             }
         }
+    }
+}
+
+// MARK: - Trackpad (iPhone Duo tabletop)
+
+/// Tabletop trackpad mode: the swap button (ControlAction.trackpadSwap) turns
+/// the bottom half into one big trackpad and back. Remembered per game.
+final class TrackpadMode: ObservableObject {
+    static let shared = TrackpadMode()
+    /// The full trackpad's touch identity when the layout has no trackpad zone.
+    static let fullID = UUID(uuidString: "7E0C5A1D-7A8C-4F5B-9E21-0D5A7C1B2E44")!
+    private static let key = "madeira.trackpad.full-by-game"
+
+    @Published private var fullByGame: [String: Bool] =
+        (UserDefaults.standard.dictionary(forKey: TrackpadMode.key) as? [String: Bool]) ?? [:]
+
+    private var gameKey: String { LibraryModel.shared.current?.uuidString ?? "default" }
+    /// This game's choice (trackpad or buttons), wherever the controls are.
+    var full: Bool { fullByGame[gameKey] ?? false }
+    /// Trackpad mode is showing now: the game's choice, in tabletop.
+    static var fullNow: Bool { Tabletop.splitNow && shared.full }
+
+    func toggle() {
+        fullByGame[gameKey] = !full
+        UserDefaults.standard.set(fullByGame, forKey: Self.key)
+        if TouchControlsModel.shared.hapticsEnabled { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+        LogStore.shared.log("[trackpad] \(full ? "trackpad" : "buttons") (tabletop \(Tabletop.splitNow))")
+    }
+}
+
+/// A trackpad as drawn: the pad's glass, the two click buttons under it, and
+/// the touch surface over both.
+struct TrackpadZone: View {
+    let id: UUID
+    let settings: TrackpadSettings
+    @ObservedObject private var library = LibraryModel.shared
+
+    var body: some View {
+        GeometryReader { g in
+            let full = CGRect(origin: .zero, size: g.size)
+            let pad = settings.padRect(in: full)
+            ZStack(alignment: .topLeading) {
+                GlassShape(cornerRadius: 16)
+                    .frame(width: pad.width, height: pad.height)
+                    .position(x: pad.midX, y: pad.midY)
+                if let b = settings.buttonRects(in: full) {
+                    GlassShape(cornerRadius: 10).frame(width: b.left.width, height: b.left.height)
+                        .position(x: b.left.midX, y: b.left.midY)
+                    GlassShape(cornerRadius: 10).frame(width: b.right.width, height: b.right.height)
+                        .position(x: b.right.midX, y: b.right.midY)
+                }
+                TrackpadSurface(id: id, settings: settings).frame(width: g.size.width, height: g.size.height)
+            }
+            .opacity(library.current != nil ? max(library.opacity, 0.3) : 1)
+        }
+    }
+}
+
+struct TrackpadSurface: UIViewRepresentable {
+    let id: UUID
+    let settings: TrackpadSettings
+    func makeUIView(context: Context) -> TrackpadView { TrackpadView() }
+    func updateUIView(_ view: TrackpadView, context: Context) { view.settings = settings }
+    static func dismantleUIView(_ view: TrackpadView, coordinator: ()) { view.releaseAll() }
+}
+
+/// A multi-touch trackpad: one finger moves the pointer (relative, with
+/// optional acceleration); tap clicks; two-finger tap right-clicks; tap then
+/// touch again and move drags; three fingers drag; two fingers scroll the
+/// wheel, with momentum; the click buttons along the bottom press and hold
+/// the left and right buttons, and another finger can move the pointer
+/// meanwhile, as on a laptop.
+final class TrackpadView: UIView {
+    var settings = TrackpadSettings()
+
+    private struct Finger { var origin: CGPoint; var last: CGPoint }
+    private var pad: [ObjectIdentifier: Finger] = [:]
+    /// Fingers on the click buttons: 0 left, 1 right.
+    private var buttons: [ObjectIdentifier: Int] = [:]
+    private let leftHighlight = UIView(), rightHighlight = UIView()
+
+    // One gesture: from the first pad finger down to the last one up.
+    private var gestureStart: TimeInterval = 0
+    private var maxFingers = 0
+    private var moved = false
+    private var dragging = false
+    private var lastMoveTime: TimeInterval = 0
+    // Tap, then drag: the first tap's click waits for a second touch.
+    private var pendingClick: DispatchWorkItem?
+    private var owedClick = false
+    private static let tapDragWindow = 0.25
+    private static let tapTime = 0.3
+    private static let slop: CGFloat = 8
+
+    private var carryX = 0.0, carryY = 0.0
+    private var wheel = 0.0
+    private var scrollVelocity = 0.0          // pt/s, finger y
+    private var momentumLink: CADisplayLink?
+    private var momentumLast: CFTimeInterval = 0
+
+    init() {
+        super.init(frame: .zero)
+        isMultipleTouchEnabled = true
+        backgroundColor = .clear
+        for v in [leftHighlight, rightHighlight] {
+            v.backgroundColor = UIColor.white.withAlphaComponent(0.28)
+            v.layer.cornerRadius = 10
+            v.isHidden = true
+            v.isUserInteractionEnabled = false
+            addSubview(v)
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(interrupted),
+            name: UIApplication.willResignActiveNotification, object: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    override func didMoveToWindow() { super.didMoveToWindow(); if window == nil { releaseAll() } }
+    @objc private func interrupted() { releaseAll() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let b = settings.buttonRects(in: bounds) { leftHighlight.frame = b.left; rightHighlight.frame = b.right }
+    }
+
+    func releaseAll() {
+        for which in Set(buttons.values) { button(which, down: false) }
+        buttons.removeAll()
+        if dragging { leftButton(false); dragging = false }
+        pendingClick?.cancel(); pendingClick = nil; owedClick = false
+        pad.removeAll()
+        stopMomentum()
+    }
+
+    // ---- posting ----
+
+    private func haptic() {
+        if TouchControlsModel.shared.hapticsEnabled { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    }
+    private func leftButton(_ down: Bool) { winios_pointer(0, 0, down ? 0x0002 : 0x0004, 0) }
+    private func rightButton(_ down: Bool) { winios_pointer(0, 0, down ? 0x0008 : 0x0010, 0) }
+    private func click(right: Bool = false) {
+        haptic()
+        if right { rightButton(true); rightButton(false) } else { leftButton(true); leftButton(false) }
+    }
+    private func button(_ which: Int, down: Bool) {
+        if down { haptic() }
+        if which == 0 { leftButton(down); leftHighlight.isHidden = !down } else { rightButton(down); rightHighlight.isHidden = !down }
+    }
+
+    /// Moves the pointer by a finger motion of `d` points over `dt` seconds.
+    private func movePointer(_ d: CGPoint, dt: TimeInterval) {
+        var gain = 1.6 * settings.speed
+        if settings.acceleration, dt > 0 {
+            let v = Double(hypot(d.x, d.y)) / dt
+            gain *= min(1 + v / 500, 4)
+        }
+        carryX += Double(d.x) * gain
+        carryY += Double(d.y) * gain
+        let dx = carryX.rounded(.towardZero), dy = carryY.rounded(.towardZero)
+        carryX -= dx; carryY -= dy
+        if dx != 0 || dy != 0 { HardwareInput.shared.postRelative(Int32(dx), Int32(dy)) }
+    }
+
+    /// Scrolls by a finger motion of `dy` points (down is positive).
+    private func scroll(_ dy: Double) {
+        let step = 36 / max(0.25, settings.scrollSpeed)
+        // Natural: the content follows the fingers, so fingers moving down show
+        // what is above: the wheel turns up (+120).
+        wheel += settings.naturalScroll ? dy : -dy
+        var notches = 0
+        while wheel >= step, notches < 16 { wheel -= step; notches += 1; winios_pointer(0, 0, 0x0800, UInt32(bitPattern: 120)) }
+        while wheel <= -step, notches < 16 { wheel += step; notches += 1; winios_pointer(0, 0, 0x0800, UInt32(bitPattern: -120)) }
+    }
+
+    // ---- momentum ----
+
+    private func startMomentum() {
+        guard settings.scroll, settings.momentum, abs(scrollVelocity) > 150 else { return }
+        stopMomentum()
+        momentumLast = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(momentumTick))
+        link.add(to: .main, forMode: .common)
+        momentumLink = link
+    }
+    private func stopMomentum() { momentumLink?.invalidate(); momentumLink = nil }
+    @objc private func momentumTick() {
+        let now = CACurrentMediaTime(), dt = min(now - momentumLast, 0.05)
+        momentumLast = now
+        scroll(scrollVelocity * dt)
+        scrollVelocity *= pow(0.94, dt * 60)
+        if abs(scrollVelocity) < 40 { stopMomentum() }
+    }
+
+    // ---- touches ----
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for t in touches {
+            let p = t.location(in: self), key = ObjectIdentifier(t)
+            if let b = settings.buttonRects(in: bounds), b.left.contains(p) || b.right.contains(p) {
+                let which = b.left.contains(p) ? 0 : 1
+                buttons[key] = which
+                if !buttons.contains(where: { $0.key != key && $0.value == which }) { button(which, down: true) }
+                continue
+            }
+            if pad.isEmpty {
+                stopMomentum()
+                gestureStart = t.timestamp; lastMoveTime = t.timestamp
+                maxFingers = 0; moved = false; scrollVelocity = 0
+                // A touch right after a tap: the tap's click waits to see whether this drags.
+                if let w = pendingClick { w.cancel(); pendingClick = nil; owedClick = true }
+            }
+            pad[key] = Finger(origin: p, last: p)
+            maxFingers = max(maxFingers, pad.count)
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard UIApplication.shared.applicationState == .active else { releaseAll(); return }
+        let mine = touches.filter { pad[ObjectIdentifier($0)] != nil }
+        guard !mine.isEmpty, let t0 = mine.first else { return }
+        // The centroid's motion, from the fingers that moved in this event.
+        var sx: CGFloat = 0, sy: CGFloat = 0
+        for t in mine {
+            let key = ObjectIdentifier(t)
+            guard var f = pad[key] else { continue }
+            let p = t.location(in: self)
+            sx += p.x - f.last.x; sy += p.y - f.last.y
+            f.last = p
+            if hypot(p.x - f.origin.x, p.y - f.origin.y) > Self.slop { moved = true }
+            pad[key] = f
+        }
+        let n = CGFloat(mine.count)
+        let d = CGPoint(x: sx / n, y: sy / n)
+        let dt = max(t0.timestamp - lastMoveTime, 1.0 / 240)
+        lastMoveTime = t0.timestamp
+        guard moved else { return }
+        switch pad.count {
+        case 1:
+            if owedClick && settings.tapDrag && !dragging { owedClick = false; dragging = true; haptic(); leftButton(true) }
+            movePointer(d, dt: dt)
+        case 2:
+            guard settings.scroll else { return }
+            scroll(Double(d.y))
+            scrollVelocity = scrollVelocity * 0.6 + Double(d.y) / dt * 0.4
+        case 3:
+            guard settings.threeFingerDrag else { return }
+            if !dragging { dragging = true; haptic(); leftButton(true) }
+            movePointer(d, dt: dt)
+        default:
+            break
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { finish(touches, cancelled: false) }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { finish(touches, cancelled: true) }
+
+    private func finish(_ touches: Set<UITouch>, cancelled: Bool) {
+        var last: UITouch?
+        for t in touches {
+            let key = ObjectIdentifier(t)
+            if let which = buttons.removeValue(forKey: key) {
+                if !buttons.values.contains(which) { button(which, down: false) }
+                continue
+            }
+            if pad.removeValue(forKey: key) != nil { last = t }
+        }
+        guard let t = last, pad.isEmpty else { return }
+        // The gesture is over.
+        let quick = t.timestamp - gestureStart < Self.tapTime
+        if dragging {
+            dragging = false
+            leftButton(false)
+        } else if !cancelled, !moved, quick, maxFingers == 1, settings.tapToClick {
+            if owedClick {
+                owedClick = false
+                click(); click()                       // a double tap
+            } else if settings.tapDrag {
+                let w = DispatchWorkItem { [weak self] in self?.pendingClick = nil; self?.click() }
+                pendingClick = w
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.tapDragWindow, execute: w)
+            } else {
+                click()
+            }
+        } else if !cancelled, !moved, quick, maxFingers == 2, settings.twoFingerRightClick {
+            if owedClick { owedClick = false; click() }
+            click(right: true)
+        } else if maxFingers == 2, moved {
+            startMomentum()
+        }
+        if owedClick { owedClick = false; click() }
+        carryX = 0; carryY = 0
     }
 }

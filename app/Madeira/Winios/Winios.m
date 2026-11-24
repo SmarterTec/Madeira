@@ -1568,6 +1568,12 @@ static BOOL winios_desktop_fit(NSNumber *key, CAMetalLayer *ml, CGRect c) {
     }
     return YES;
 }
+int winios_desktop_overflow(int *w, int *h) {
+    if (!g_fit_key || g_fit_client_px.size.width <= 0 || g_fit_client_px.size.height <= 0) return 0;
+    if (w) *w = (int)ceil(CGRectGetMaxX(g_fit_client_px));
+    if (h) *h = (int)ceil(CGRectGetMaxY(g_fit_client_px));
+    return 1;
+}
 /* Desktop px -> compositor-view points through the fitted window, if any. */
 static BOOL winios_desktop_fit_map(CGFloat x, CGFloat y, CGPoint *pt, CGFloat *scale) {
     if (!g_fit_key || g_fit_client_px.size.width <= 0 || !CGRectContainsPoint(g_fit_client_px, CGPointMake(x, y)))

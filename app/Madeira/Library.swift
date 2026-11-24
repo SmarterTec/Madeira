@@ -1748,6 +1748,7 @@ final class LibraryModel: ObservableObject {
         MainActor.assumeIsolated { InteractionFrameRate.shared.end() }   // a game owns the panel's rate (ProMotionIntent)
         if LibraryGridArm.enabled { NotificationCenter.default.post(name: LibraryGridArm.releaseMemory, object: nil) }
         activeEntry = entry; current = entry.id; menu = false; performance = entry.performance; liveLogs = entry.liveLogs
+        DesktopGrow.start()   // DisplayGeometry.swift: a game window bigger than its desktop
         LogStore.shared.setDisplayActive(entry.liveLogs)
         fpsMode = entry.fpsMode; sessionMessage = "Starting…"
         opacity = min(max(entry.controlOpacity ?? 0.7, 0.15), 1)
@@ -1950,6 +1951,7 @@ final class LibraryModel: ObservableObject {
         controls.controls = savedControls; controls.visible = savedVisible; controls.sizeScale = savedSize
         GestureZonesModel.shared.selected = nil; GestureZonesModel.shared.zones = savedZones
         if ControlPresetsModel.enabled { controls.layoutID = savedLayout }
+        DesktopGrow.stop()
         current = nil; activeEntry = nil; menu = false; sessionMessage = ""
         quitRequestedAt = nil; forceCloseOffered = false; dockGameEnded = false; dockGameEndedAt = nil
         displayMode = .fit
@@ -4885,6 +4887,7 @@ struct ControllerBindsPage: View {
         case .joystickWASD:    return "WASD"
         case .joystickArrows:  return "Arrow keys"
         case .keyboardToggle:  return "Show keyboard"
+        case .trackpadSwap:    return "Trackpad swap"
         case .pad(let n):      return n
         case .key(let vk):     return keyName(vk)
         }
